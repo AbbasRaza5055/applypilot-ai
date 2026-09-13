@@ -3,6 +3,7 @@ from .opportunity import Opportunity
 from .matching import MatchResult
 from .ats import ATSReport
 from .application import ApplicationPackage
+from .resume_optimization import ResumeOptimizationResult
 
 __all__ = [
     "CandidateProfile",
@@ -10,4 +11,5 @@ __all__ = [
     "MatchResult",
     "ATSReport",
     "ApplicationPackage",
+    "ResumeOptimizationResult",
 ]
