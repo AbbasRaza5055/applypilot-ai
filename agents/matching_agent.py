@@ -14,7 +14,7 @@ from pydantic import ValidationError
 
 from models import CandidateProfile, MatchResult, Opportunity
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
 
 
 # ---------------------------------------------------------------------------

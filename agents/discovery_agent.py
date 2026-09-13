@@ -1,14 +1,14 @@
-"""Gemini Search-grounded opportunity discovery from a CandidateProfile.
+"""Groq browser-search opportunity discovery from a CandidateProfile.
 
 Two-stage flow
 --------------
-Stage 1 — Grounded research
-    Gemini + Google Search grounding collects current web information.
+Stage 1 — Live research
+    Groq + browser_search collects current web information.
     Returns prose text with citations; NOT parsed as JSON.
 
 Stage 2 — Structured extraction
-    The prose from Stage 1 is passed to a second Gemini call WITHOUT the
-    search tool, using response_mime_type="application/json" and a bounded
+    The prose from Stage 1 is passed to a second Groq call WITHOUT the
+    search tool, using response_format={"type": "json_object"} and a bounded
     output token limit to extract a clean Opportunity array.
 """
 
@@ -24,7 +24,7 @@ from pydantic import ValidationError
 
 from models import CandidateProfile, Opportunity
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 
 VALID_TYPES = {"job", "internship", "scholarship", "hackathon", "fellowship"}
 
@@ -60,15 +60,15 @@ class DiscoveryAgentError(RuntimeError):
 
 
 class DiscoveryConfigurationError(DiscoveryAgentError):
-    """Raised when the Gemini client cannot be configured."""
+    """Raised when the Groq client cannot be configured."""
 
 
 class DiscoveryAPIError(DiscoveryAgentError):
-    """Raised when a Gemini API call fails."""
+    """Raised when a Groq API call fails."""
 
 
 class DiscoveryResponseError(DiscoveryAgentError):
-    """Raised when Gemini returns an unusable response."""
+    """Raised when Groq returns an unusable response."""
 
 
 class DiscoveryValidationError(DiscoveryAgentError):
@@ -76,19 +76,18 @@ class DiscoveryValidationError(DiscoveryAgentError):
 
 
 # ---------------------------------------------------------------------------
-# Gemini client (mirrors profile_agent pattern)
+# Groq client
 # ---------------------------------------------------------------------------
 
 
-def _get_gemini_client(api_key: str) -> tuple[Any, Any]:
+def _get_groq_client(api_key: str) -> Any:
     try:
-        from google import genai
-        from google.genai import types
+        from groq import Groq
     except ImportError as exc:
         raise DiscoveryConfigurationError(
-            "Opportunity discovery requires the 'google-genai' package."
+            "Opportunity discovery requires the 'groq' package."
         ) from exc
-    return genai.Client(api_key=api_key), types
+    return Groq(api_key=api_key)
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +177,7 @@ def _build_search_queries(candidate: CandidateProfile) -> list[str]:
 
 
 def _research_prompt(candidate: CandidateProfile, queries: list[str]) -> str:
-    """Stage 1 prompt: instructs Gemini to search and summarise findings."""
+    """Stage 1 prompt: instructs Groq to search and summarise findings."""
     profile_summary = (
         f"Name: {candidate.name}\n"
         f"Location: {candidate.location or 'not specified'}\n"
@@ -191,7 +190,7 @@ def _research_prompt(candidate: CandidateProfile, queries: list[str]) -> str:
     queries_block = "\n".join(f"- {q}" for q in queries)
 
     return f"""
-You are an opportunity research assistant. Use Google Search to find CURRENT,
+You are an opportunity research assistant. Use browser search to find CURRENT,
 real opportunities relevant to the candidate profile below.
 
 CANDIDATE PROFILE:
@@ -253,95 +252,83 @@ Return ONLY the JSON array. No markdown fences, no explanation.
 
 
 # ---------------------------------------------------------------------------
-# Two-stage Gemini calls
+# Two-stage Groq calls
 # ---------------------------------------------------------------------------
 
 
-def _run_grounded_research(
-    client: Any,
-    types: Any,
-    model_name: str,
-    prompt: str,
-) -> str:
-    """Stage 1: call Gemini with Google Search grounding; return prose text."""
+def _run_browser_research(client: Any, model_name: str, prompt: str) -> str:
+    """Stage 1: call Groq with browser_search; return prose text."""
     try:
-        response = client.models.generate_content(
+        response = client.chat.completions.create(
             model=model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch())],
-                temperature=0,
-                max_output_tokens=4096,
-            ),
+            messages=[{"role": "user", "content": prompt}],
+            tools=[{"type": "browser_search"}],
+            tool_choice="required",
+            temperature=0,
+            max_completion_tokens=4096,
         )
     except Exception as exc:
         raise DiscoveryAPIError(
-            f"Gemini grounded research call failed: {exc}"
+            f"Groq browser research call failed: {exc}"
         ) from exc
 
     try:
-        text = response.text
-    except AttributeError as exc:
+        text = response.choices[0].message.content
+    except (AttributeError, IndexError, TypeError) as exc:
         raise DiscoveryResponseError(
-            "Gemini grounded research returned no text."
+            "Groq browser research returned no text."
         ) from exc
 
     if not text or not text.strip():
         raise DiscoveryResponseError(
-            "Gemini grounded research returned an empty response."
+            "Groq browser research returned an empty response."
         )
 
     return text
 
 
 def _run_structured_extraction(
-    client: Any,
-    types: Any,
-    model_name: str,
-    research_text: str,
-    max_results: int,
+    client: Any, model_name: str, research_text: str, max_results: int
 ) -> list[dict]:
     """Stage 2: extract structured JSON from prose; no grounding tool used."""
     prompt = _extraction_prompt(research_text, max_results)
 
     try:
-        response = client.models.generate_content(
+        response = client.chat.completions.create(
             model=model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0,
-                max_output_tokens=8192,
-            ),
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            temperature=0,
+            max_completion_tokens=8192,
         )
     except Exception as exc:
         raise DiscoveryAPIError(
-            f"Gemini structured extraction call failed: {exc}"
+            f"Groq structured extraction call failed: {exc}"
         ) from exc
 
     try:
-        raw_text = response.text
-    except AttributeError as exc:
+        raw_text = response.choices[0].message.content
+    except (AttributeError, IndexError, TypeError) as exc:
         raise DiscoveryResponseError(
-            "Gemini structured extraction returned no text."
+            "Groq structured extraction returned no text."
         ) from exc
 
     if not raw_text or not raw_text.strip():
         raise DiscoveryResponseError(
-            "Gemini structured extraction returned an empty response."
+            "Groq structured extraction returned an empty response."
         )
 
     try:
         raw_list = json.loads(raw_text.strip())
     except json.JSONDecodeError as exc:
         raise DiscoveryResponseError(
-            f"Gemini structured extraction response is not valid JSON: {exc}"
+            f"Groq structured extraction response is not valid JSON: {exc}"
             f"\nRaw: {raw_text[:300]}"
         ) from exc
 
     if not isinstance(raw_list, list):
         raise DiscoveryResponseError(
-            "Gemini structured extraction response is not a JSON array of opportunities."
+            "Groq structured extraction response is not a JSON array of opportunities."
         )
 
     return raw_list
@@ -358,31 +345,31 @@ def discover_opportunities(
 ) -> list[Opportunity]:
     """Discover current opportunities relevant to the candidate profile.
 
-    Stage 1: Gemini + Google Search grounding collects raw web research.
-    Stage 2: A second Gemini call (no grounding, structured JSON output)
+    Stage 1: Groq + browser_search collects raw web research.
+    Stage 2: A second Groq call (no search, structured JSON output)
              converts the research into validated Opportunity objects.
     """
     if not isinstance(candidate, CandidateProfile):
         raise TypeError("candidate must be a CandidateProfile instance.")
 
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise DiscoveryConfigurationError(
-            "GEMINI_API_KEY is not set. Configure it before discovering opportunities."
+            "GROQ_API_KEY is not set. Configure it before discovering opportunities."
         )
 
-    client, types = _get_gemini_client(api_key)
-    model_name = os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
+    client = _get_groq_client(api_key)
+    model_name = os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL)
     queries = _build_search_queries(candidate)
 
     # Stage 1 — grounded research (prose output, may contain citations)
-    research_text = _run_grounded_research(
-        client, types, model_name, _research_prompt(candidate, queries)
+    research_text = _run_browser_research(
+        client, model_name, _research_prompt(candidate, queries)
     )
 
     # Stage 2 — structured extraction (JSON output, no grounding tool)
     raw_list = _run_structured_extraction(
-        client, types, model_name, research_text, max_results
+        client, model_name, research_text, max_results
     )
 
     opportunities: list[Opportunity] = []

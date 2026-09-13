@@ -14,7 +14,7 @@ from models.opportunity import Opportunity
 from models.profile import CandidateProfile
 from models.resume_optimization import ResumeOptimizationResult
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
 MAX_OUTPUT_TOKENS = 8192
 
 _REQUIRED_FIELDS = {"cover_letter", "sop", "application_answers", "required_documents", "checklist"}

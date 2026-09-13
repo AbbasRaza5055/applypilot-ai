@@ -2,7 +2,7 @@ import json
 import os
 from typing import Any
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
 
 from models.ats import ATSReport
 from models.opportunity import Opportunity
