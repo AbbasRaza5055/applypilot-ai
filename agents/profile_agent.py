@@ -11,7 +11,7 @@ from models import CandidateProfile
 from services.document_service import extract_text_from_resume
 
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
 
 
 class ProfileAgentError(RuntimeError):
