@@ -444,4 +444,4 @@ def test_gemini_model_defaults_to_flash_when_env_absent(monkeypatch):
         _make_candidate(), _make_opportunity(), _make_optimized_resume(), _make_ats_report()
     )
 
-    assert captured["request"]["model"] == "gemini-2.5-flash"
+    assert captured["request"]["model"] == "gemini-3.6-flash"

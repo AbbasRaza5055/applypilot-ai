@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from models import ATSReport, CandidateProfile, Opportunity
 
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
 MAX_OUTPUT_TOKENS = 4096
 _REPORT_FIELDS = {
     "ats_score",
