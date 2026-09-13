@@ -367,10 +367,7 @@ GEMINI_MODEL=gemini-3.6-flash
 
 GROQ_API_KEY=your_groq_api_key_here
 GROQ_MODEL=openai/gpt-oss-120b
-
-ADZUNA_APP_ID=your_adzuna_app_id_here
-ADZUNA_APP_KEY=your_adzuna_app_key_here
-ADZUNA_COUNTRY_CODE=gb
+SERPER_API_KEY = your api key
 ```
 
 > **Never commit the real `.env` file or API keys to GitHub.**
