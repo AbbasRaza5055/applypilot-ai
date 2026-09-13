@@ -2,6 +2,8 @@ import json
 import os
 from typing import Any
 
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+
 from models.ats import ATSReport
 from models.opportunity import Opportunity
 from models.profile import CandidateProfile
@@ -130,7 +132,7 @@ Each list item must be concise and grounded in the supplied information.
         client, types = _get_gemini_client(api_key)
 
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model=os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -175,6 +177,12 @@ Each list item must be concise and grounded in the supplied information.
 
         raise ResumeOptimizerResponseError(
             f"Gemini response is missing required fields: {missing_fields}"
+        )
+
+    optimized_resume = data.get("optimized_resume")
+    if not isinstance(optimized_resume, str) or not optimized_resume.strip():
+        raise ResumeOptimizerResponseError(
+            "optimized_resume must be a non-empty string"
         )
 
     try:

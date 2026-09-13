@@ -372,3 +372,91 @@ def test_optimize_resume_uses_json_mode_and_temperature(monkeypatch):
     assert captured_config["response_mime_type"] == "application/json"
     assert captured_config["temperature"] == 0
     assert captured_config["max_output_tokens"] == 8192
+
+
+
+def _mock_client(monkeypatch, payload: dict):
+    """Shared helper: patch _get_gemini_client and capture the generate_content call."""
+    captured = {}
+
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            captured.update(kwargs)
+            return _make_gemini_response(payload)
+
+    class FakeClient:
+        models = FakeModels()
+
+    monkeypatch.setattr(
+        resume_optimizer,
+        "_get_gemini_client",
+        lambda api_key: (
+            FakeClient(),
+            SimpleNamespace(GenerateContentConfig=lambda **kwargs: kwargs),
+        ),
+    )
+    return captured
+
+
+def test_gemini_model_env_var_is_respected(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-custom-model")
+    captured = _mock_client(monkeypatch, _make_result_payload())
+
+    resume_optimizer.optimize_resume(
+        _make_candidate(),
+        _make_opportunity(),
+        _make_resume_text(),
+        _make_ats_report(),
+    )
+
+    assert captured["model"] == "gemini-custom-model"
+
+
+def test_gemini_model_defaults_to_flash_when_env_absent(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    captured = _mock_client(monkeypatch, _make_result_payload())
+
+    resume_optimizer.optimize_resume(
+        _make_candidate(),
+        _make_opportunity(),
+        _make_resume_text(),
+        _make_ats_report(),
+    )
+
+    assert captured["model"] == "gemini-2.5-flash"
+
+
+def test_empty_optimized_resume_is_rejected(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    payload = {**_make_result_payload(), "optimized_resume": ""}
+    _mock_client(monkeypatch, payload)
+
+    with pytest.raises(
+        resume_optimizer.ResumeOptimizerResponseError,
+        match="non-empty",
+    ):
+        resume_optimizer.optimize_resume(
+            _make_candidate(),
+            _make_opportunity(),
+            _make_resume_text(),
+            _make_ats_report(),
+        )
+
+
+def test_whitespace_only_optimized_resume_is_rejected(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    payload = {**_make_result_payload(), "optimized_resume": "   "}
+    _mock_client(monkeypatch, payload)
+
+    with pytest.raises(
+        resume_optimizer.ResumeOptimizerResponseError,
+        match="non-empty",
+    ):
+        resume_optimizer.optimize_resume(
+            _make_candidate(),
+            _make_opportunity(),
+            _make_resume_text(),
+            _make_ats_report(),
+        )
