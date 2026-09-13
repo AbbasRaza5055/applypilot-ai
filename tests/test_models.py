@@ -6,6 +6,8 @@ from models import (
     Opportunity,
 )
 
+from models.resume_optimization import ResumeOptimizationResult
+
 
 def test_candidate_profile():
     profile = CandidateProfile(
@@ -59,3 +61,13 @@ def test_application_package():
 
     assert package.cover_letter is not None
     assert "Upload transcript" in package.checklist
+def test_resume_optimization_result_defaults():
+    result = ResumeOptimizationResult(
+        optimized_resume="Optimized resume text"
+    )
+
+    assert result.optimized_resume == "Optimized resume text"
+    assert result.changed_sections == []
+    assert result.added_keywords == []
+    assert result.removed_or_weak_content == []
+    assert result.recommendations == []
