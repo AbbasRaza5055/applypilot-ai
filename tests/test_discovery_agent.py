@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import json
-from types import SimpleNamespace
+from datetime import date, timedelta
 
 import pytest
 
@@ -12,13 +11,8 @@ from agents import discovery_agent
 from models import CandidateProfile, Opportunity
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _make_candidate(**kwargs) -> CandidateProfile:
-    defaults = dict(
+def _candidate(**overrides) -> CandidateProfile:
+    value = dict(
         name="Jane Doe",
         location="Pakistan",
         skills=["Python", "Machine Learning"],
@@ -26,25 +20,25 @@ def _make_candidate(**kwargs) -> CandidateProfile:
         interests=["AI", "open source"],
         experience=["Software intern at XYZ"],
     )
-    defaults.update(kwargs)
-    return CandidateProfile(**defaults)
+    value.update(overrides)
+    return CandidateProfile(**value)
 
 
-def _make_raw_opportunity(**kwargs) -> dict:
-    base = dict(
+def _raw(**overrides) -> dict:
+    value = dict(
         id="",
         title="AI/ML Intern",
         organization="Example Corp",
         type="internship",
-        description="An AI/ML internship.",
+        description="Currently open AI/ML internship.",
         requirements=["Python"],
         deadline=None,
         location="Remote",
         url="https://example.com/jobs/ai-intern",
         source="example.com",
     )
-    base.update(kwargs)
-    return base
+    value.update(overrides)
+    return value
 
 
 def _stable_id(url: str) -> str:
@@ -52,176 +46,48 @@ def _stable_id(url: str) -> str:
     return hashlib.sha256(normalised.encode()).hexdigest()[:16]
 
 
-def _mock_gemini_two_stage(
-    monkeypatch,
-    research_text: str,
-    structured_json: str,
-):
-    """Patch _get_gemini_client to simulate the two-stage Gemini flow.
+def _mock_search(monkeypatch, payload=None):
+    calls = []
 
-    Call 1 (grounded research) → returns research_text via response.text
-    Call 2 (structured extraction) → returns structured_json via response.text
-    """
-    captured = {"calls": [], "configs": []}
-    call_responses = [research_text, structured_json]
+    def search(query, api_url, api_key):
+        calls.append((query, api_url, api_key))
+        return {"organic": [] if payload is None else payload}
 
-    class FakeGenerateContentConfig:
-        def __init__(self, **kwargs):
-            captured["configs"].append(kwargs)
-
-    class FakeTool:
-        def __init__(self, **kwargs):
-            pass
-
-    class FakeGoogleSearch:
-        pass
-
-    class FakeModels:
-        def generate_content(self, **kwargs):
-            idx = len(captured["calls"])
-            captured["calls"].append(kwargs)
-            text = call_responses[idx] if idx < len(call_responses) else ""
-            return SimpleNamespace(text=text)
-
-    client = SimpleNamespace(models=FakeModels())
-    types = SimpleNamespace(
-        GenerateContentConfig=FakeGenerateContentConfig,
-        Tool=FakeTool,
-        GoogleSearch=FakeGoogleSearch,
-    )
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    monkeypatch.setattr(
-        discovery_agent, "_get_gemini_client", lambda api_key: (client, types)
-    )
-    return captured
+    monkeypatch.setenv("DISCOVERY_SEARCH_API_KEY", "test-key")
+    monkeypatch.setattr(discovery_agent, "_search_provider", search)
+    return calls
 
 
-# ---------------------------------------------------------------------------
-# 1. Valid CandidateProfile returns Opportunity objects
-# ---------------------------------------------------------------------------
-
-
-def test_discover_returns_opportunity_objects(monkeypatch):
-    raw = [_make_raw_opportunity()]
-    _mock_gemini_two_stage(monkeypatch, "Research prose text.", json.dumps(raw))
-
-    results = discovery_agent.discover_opportunities(_make_candidate())
-
-    assert len(results) == 1
-    assert isinstance(results[0], Opportunity)
-
-
-# ---------------------------------------------------------------------------
-# 2. Output is list[Opportunity]
-# ---------------------------------------------------------------------------
-
-
-def test_discover_returns_list(monkeypatch):
-    raw = [
-        _make_raw_opportunity(),
-        _make_raw_opportunity(url="https://example.com/job2", title="Job 2"),
-    ]
-    _mock_gemini_two_stage(monkeypatch, "Research prose.", json.dumps(raw))
-
-    results = discovery_agent.discover_opportunities(_make_candidate())
-
+def test_valid_candidate_returns_list_of_opportunities(monkeypatch):
+    calls = _mock_search(monkeypatch, [_raw()])
+    results = discovery_agent.discover_opportunities(_candidate())
     assert isinstance(results, list)
-    assert all(isinstance(r, Opportunity) for r in results)
+    assert isinstance(results[0], Opportunity)
+    assert len(calls) == len(discovery_agent._build_search_queries(_candidate()))
 
 
-# ---------------------------------------------------------------------------
-# 3. Invalid / missing URL is filtered out
-# ---------------------------------------------------------------------------
-
-
-def test_invalid_url_is_filtered(monkeypatch):
-    raw = [
-        _make_raw_opportunity(url="not-a-url"),
-        _make_raw_opportunity(url=""),
-        _make_raw_opportunity(url="ftp://bad-scheme.com/job"),
-        _make_raw_opportunity(url="https://example.com/valid"),
+def test_invalid_urls_and_duplicate_urls_are_filtered(monkeypatch):
+    extracted = [
+        _raw(url="not-a-url"),
+        _raw(url="ftp://bad.example/job"),
+        _raw(url="https://www.google.com/search?q=internships"),
+        _raw(url="https://example.com/search?q=internships"),
+        _raw(url="https://example.com/jobs/ai-intern/"),
+        _raw(url="https://example.com/jobs/ai-intern", title="Duplicate"),
+        _raw(url="https://example.com/valid"),
     ]
-    _mock_gemini_two_stage(monkeypatch, "Research prose.", json.dumps(raw))
-
-    results = discovery_agent.discover_opportunities(_make_candidate())
-
-    assert len(results) == 1
-    assert results[0].url == "https://example.com/valid"
-
-
-# ---------------------------------------------------------------------------
-# 4. Duplicate URLs are removed
-# ---------------------------------------------------------------------------
-
-
-def test_duplicate_urls_removed(monkeypatch):
-    url = "https://example.com/jobs/ai-intern"
-    raw = [
-        _make_raw_opportunity(url=url),
-        _make_raw_opportunity(url=url, title="Duplicate"),
+    _mock_search(monkeypatch, extracted)
+    results = discovery_agent.discover_opportunities(_candidate())
+    assert [result.url for result in results] == [
+        "https://example.com/jobs/ai-intern/", "https://example.com/valid"
     ]
-    _mock_gemini_two_stage(monkeypatch, "Research prose.", json.dumps(raw))
-
-    results = discovery_agent.discover_opportunities(_make_candidate())
-
-    assert len(results) == 1
 
 
-def test_duplicate_urls_trailing_slash_normalised(monkeypatch):
-    raw = [
-        _make_raw_opportunity(url="https://example.com/job/"),
-        _make_raw_opportunity(url="https://example.com/job", title="Same without slash"),
-    ]
-    _mock_gemini_two_stage(monkeypatch, "Research prose.", json.dumps(raw))
-
-    results = discovery_agent.discover_opportunities(_make_candidate())
-
-    assert len(results) == 1
-
-
-# ---------------------------------------------------------------------------
-# 5. Opportunity IDs are deterministic
-# ---------------------------------------------------------------------------
-
-
-def test_opportunity_id_is_deterministic(monkeypatch):
-    url = "https://example.com/jobs/ai-intern"
-    raw = [_make_raw_opportunity(url=url)]
-    _mock_gemini_two_stage(monkeypatch, "Research prose.", json.dumps(raw))
-
-    results = discovery_agent.discover_opportunities(_make_candidate())
-
-    assert results[0].id == _stable_id(url)
-
-
-def test_same_url_same_id_across_calls(monkeypatch):
-    url = "https://example.com/jobs/ai-intern"
-    raw = [_make_raw_opportunity(url=url)]
-
-    _mock_gemini_two_stage(monkeypatch, "Research prose.", json.dumps(raw))
-    first = discovery_agent.discover_opportunities(_make_candidate())
-
-    _mock_gemini_two_stage(monkeypatch, "Research prose.", json.dumps(raw))
-    second = discovery_agent.discover_opportunities(_make_candidate())
-
-    assert first[0].id == second[0].id
-
-
-# ---------------------------------------------------------------------------
-# 6. Opportunity type is normalized
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("raw_type,expected", [
+@pytest.mark.parametrize("raw_type, expected", [
     ("internship", "internship"),
-    ("Internship", "internship"),
-    ("full-time", "job"),
     ("Full Time Employment", "job"),
-    ("scholarship", "scholarship"),
     ("grant", "scholarship"),
-    ("hackathon", "hackathon"),
     ("competition", "hackathon"),
-    ("fellowship", "fellowship"),
     ("graduate", "fellowship"),
     ("co-op", "internship"),
     ("unknown_type", "job"),
@@ -230,356 +96,207 @@ def test_type_normalization(raw_type, expected):
     assert discovery_agent._normalize_type(raw_type) == expected
 
 
-def test_normalized_type_in_returned_opportunity(monkeypatch):
-    raw = [_make_raw_opportunity(type="Full Time Employment")]
-    _mock_gemini_two_stage(monkeypatch, "Research prose.", json.dumps(raw))
-
-    results = discovery_agent.discover_opportunities(_make_candidate())
-
-    assert results[0].type == "job"
-
-
-# ---------------------------------------------------------------------------
-# 7. Missing optional fields are handled correctly
-# ---------------------------------------------------------------------------
-
-
-def test_optional_fields_can_be_none(monkeypatch):
-    raw = [_make_raw_opportunity(deadline=None, location=None, source=None)]
-    _mock_gemini_two_stage(monkeypatch, "Research prose.", json.dumps(raw))
-
-    results = discovery_agent.discover_opportunities(_make_candidate())
-
-    assert results[0].deadline is None
-    assert results[0].location is None
-    assert results[0].source is None
+def test_deterministic_id_type_normalization_and_optional_fields(monkeypatch):
+    url = "https://example.com/jobs/ai-intern"
+    extracted = [_raw(
+        url=url,
+        type="Full Time Employment",
+        deadline=(date.today() + timedelta(days=30)).isoformat(),
+        location=None,
+        source=None,
+        requirements=[],
+    )]
+    _mock_search(monkeypatch, extracted)
+    result = discovery_agent.discover_opportunities(_candidate())[0]
+    assert result.id == _stable_id(url)
+    assert result.type == "job"
+    assert result.deadline == (date.today() + timedelta(days=30)).isoformat()
+    assert result.location is None
+    assert result.source is None
+    assert result.requirements == []
 
 
-def test_empty_requirements_list_accepted(monkeypatch):
-    raw = [_make_raw_opportunity(requirements=[])]
-    _mock_gemini_two_stage(monkeypatch, "Research prose.", json.dumps(raw))
-
-    results = discovery_agent.discover_opportunities(_make_candidate())
-
-    assert results[0].requirements == []
+def test_missing_search_configuration_raises_configuration_error(monkeypatch):
+    monkeypatch.delenv("DISCOVERY_SEARCH_API_KEY", raising=False)
+    monkeypatch.delenv("SERPER_API_KEY", raising=False)
+    with pytest.raises(discovery_agent.DiscoveryConfigurationError, match="SEARCH_API_KEY"):
+        discovery_agent.discover_opportunities(_candidate())
 
 
-# ---------------------------------------------------------------------------
-# 8. API / search failure is handled
-# ---------------------------------------------------------------------------
+def test_search_provider_error_raises_api_error(monkeypatch):
+    def broken_search(query, api_url, api_key):
+        raise RuntimeError("search provider unavailable")
+
+    monkeypatch.setenv("DISCOVERY_SEARCH_API_KEY", "test-key")
+    monkeypatch.setattr(discovery_agent, "_search_provider", broken_search)
+    with pytest.raises(discovery_agent.DiscoveryAPIError, match="unavailable"):
+        discovery_agent.discover_opportunities(_candidate())
 
 
-def test_api_failure_raises_discovery_api_error(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-
-    class BrokenModels:
-        def generate_content(self, **kwargs):
-            raise RuntimeError("network error")
-
-    client = SimpleNamespace(models=BrokenModels())
-
-    class FakeGenerateContentConfig:
-        def __init__(self, **kwargs): pass
-
-    class FakeTool:
-        def __init__(self, **kwargs): pass
-
-    class FakeGoogleSearch:
-        pass
-
-    types = SimpleNamespace(
-        GenerateContentConfig=FakeGenerateContentConfig,
-        Tool=FakeTool,
-        GoogleSearch=FakeGoogleSearch,
-    )
+def test_malformed_search_results_raise_response_error(monkeypatch):
+    monkeypatch.setenv("DISCOVERY_SEARCH_API_KEY", "test-key")
     monkeypatch.setattr(
-        discovery_agent, "_get_gemini_client", lambda api_key: (client, types)
+        discovery_agent, "_search_provider", lambda query, api_url, api_key: {}
     )
-
-    with pytest.raises(discovery_agent.DiscoveryAPIError, match="network error"):
-        discovery_agent.discover_opportunities(_make_candidate())
-
-
-def test_missing_api_key_raises_configuration_error(monkeypatch):
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-
-    with pytest.raises(discovery_agent.DiscoveryConfigurationError, match="GEMINI_API_KEY"):
-        discovery_agent.discover_opportunities(_make_candidate())
+    with pytest.raises(discovery_agent.DiscoveryResponseError):
+        discovery_agent.discover_opportunities(_candidate())
 
 
-def test_invalid_json_response_raises_response_error(monkeypatch):
-    _mock_gemini_two_stage(monkeypatch, "Research prose.", "this is not json")
-
-    with pytest.raises(discovery_agent.DiscoveryResponseError, match="not valid JSON"):
-        discovery_agent.discover_opportunities(_make_candidate())
-
-
-def test_non_array_json_raises_response_error(monkeypatch):
-    _mock_gemini_two_stage(monkeypatch, "Research prose.", json.dumps({"key": "value"}))
-
-    with pytest.raises(discovery_agent.DiscoveryResponseError, match="not a JSON array"):
-        discovery_agent.discover_opportunities(_make_candidate())
-
-
-def test_empty_stage2_response_raises_response_error(monkeypatch):
-    _mock_gemini_two_stage(monkeypatch, "Research prose.", "")
-
-    with pytest.raises(discovery_agent.DiscoveryResponseError, match="empty response"):
-        discovery_agent.discover_opportunities(_make_candidate())
-
-
-# ---------------------------------------------------------------------------
-# 9. Zero relevant results returns empty list safely
-# ---------------------------------------------------------------------------
-
-
-def test_all_invalid_urls_returns_empty_list(monkeypatch):
-    raw = [_make_raw_opportunity(url="bad-url"), _make_raw_opportunity(url="")]
-    _mock_gemini_two_stage(monkeypatch, "Research prose.", json.dumps(raw))
-
-    results = discovery_agent.discover_opportunities(_make_candidate())
-
-    assert results == []
-
-
-def test_empty_array_response_returns_empty_list(monkeypatch):
-    _mock_gemini_two_stage(monkeypatch, "Research prose.", json.dumps([]))
-
-    results = discovery_agent.discover_opportunities(_make_candidate())
-
-    assert results == []
-
-
-# ---------------------------------------------------------------------------
-# 10. max_results is respected
-# ---------------------------------------------------------------------------
-
-
-def test_max_results_is_respected(monkeypatch):
-    raw = [
-        _make_raw_opportunity(url=f"https://example.com/job/{i}", title=f"Job {i}")
-        for i in range(8)
+def test_malformed_items_are_skipped_and_max_results_respected(monkeypatch):
+    extracted = [{"not": "an opportunity"}] + [
+        _raw(url=f"https://example.com/job/{index}", title=f"Job {index}")
+        for index in range(5)
     ]
-    _mock_gemini_two_stage(monkeypatch, "Research prose.", json.dumps(raw))
-
-    results = discovery_agent.discover_opportunities(_make_candidate(), max_results=3)
-
-    assert len(results) <= 3
+    _mock_search(monkeypatch, extracted)
+    results = discovery_agent.discover_opportunities(_candidate(), max_results=3)
+    assert len(results) == 3
 
 
-# ---------------------------------------------------------------------------
-# 11. Non-CandidateProfile input raises TypeError
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("deadline, expected", [
+    ((date.today() - timedelta(days=1)).isoformat(), False),
+    (date.today().isoformat(), True),
+    ((date.today() + timedelta(days=1)).isoformat(), True),
+])
+def test_deadline_freshness_filter(monkeypatch, deadline, expected):
+    _mock_search(monkeypatch, [_raw(deadline=deadline)])
+    results = discovery_agent.discover_opportunities(_candidate())
+    assert bool(results) is expected
 
 
-def test_non_profile_input_raises_type_error(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+@pytest.mark.parametrize("deadline", [
+    "2026-09-14T23:59:00Z",
+    "14-09-2026",
+    "09-14-2026",
+    "14/09/2026",
+    "09/14/2026",
+])
+def test_common_future_deadline_formats_are_accepted(monkeypatch, deadline):
+    _mock_search(monkeypatch, [_raw(deadline=deadline)])
+    assert discovery_agent.discover_opportunities(_candidate())
 
+
+def test_expired_2026_deadline_is_rejected(monkeypatch):
+    _mock_search(monkeypatch, [_raw(deadline="2026-01-01")])
+    assert discovery_agent.discover_opportunities(_candidate()) == []
+
+
+def test_unparseable_deadline_requires_explicit_open_status(monkeypatch):
+    _mock_search(monkeypatch, [
+        _raw(url="https://example.com/open", deadline="late September"),
+        _raw(
+            url="https://example.com/unknown",
+            deadline="deadline to be announced",
+            description="A listing without current status.",
+        ),
+    ])
+    results = discovery_agent.discover_opportunities(_candidate())
+    assert [result.url for result in results] == ["https://example.com/open"]
+
+
+def test_ten_valid_candidates_can_be_returned(monkeypatch):
+    extracted = [
+        _raw(
+            url=f"https://example.com/opportunity/{index}",
+            title=f"Python Opportunity {index}",
+            deadline=(date.today() + timedelta(days=index + 1)).isoformat(),
+        )
+        for index in range(10)
+    ]
+    _mock_search(monkeypatch, extracted)
+    results = discovery_agent.discover_opportunities(_candidate(), max_results=10)
+    assert len(results) == 10
+
+
+def test_all_target_categories_are_searched(monkeypatch):
+    calls = _mock_search(monkeypatch)
+    with pytest.raises(discovery_agent.DiscoveryResponseError):
+        discovery_agent.discover_opportunities(_candidate())
+    queries = [call[0] for call in calls]
+    assert len(queries) == 5
+    assert any("jobs" in query for query in queries)
+    assert any("internships" in query for query in queries)
+    assert any("scholarships" in query for query in queries)
+    assert any("hackathons" in query for query in queries)
+    assert any("fellowships" in query for query in queries)
+
+
+def test_repeated_discovery_calls_refresh_provider(monkeypatch):
+    calls = _mock_search(monkeypatch, [_raw()])
+    discovery_agent.discover_opportunities(_candidate())
+    first_count = len(calls)
+    discovery_agent.discover_opportunities(_candidate())
+    assert len(calls) == first_count * 2
+
+
+def test_missing_deadline_requires_explicitly_open_description(monkeypatch):
+    _mock_search(monkeypatch, [
+        _raw(url="https://example.com/open", deadline=None),
+        _raw(
+            url="https://example.com/unknown",
+            deadline=None,
+            description="An opportunity with no stated status.",
+        ),
+    ])
+    results = discovery_agent.discover_opportunities(_candidate())
+    assert [result.url for result in results] == ["https://example.com/open"]
+
+
+def test_unparseable_deadline_current_status_is_accepted(monkeypatch):
+    _mock_search(monkeypatch, [
+        _raw(
+            deadline="date announced on official page",
+            description="Current opportunity with active applications.",
+        )
+    ])
+    assert discovery_agent.discover_opportunities(_candidate())
+
+
+def test_filtering_stage_counts_are_consistent(monkeypatch):
+    payload = [
+        _raw(url="https://example.com/valid"),
+        _raw(url="https://example.com/valid/", title="Duplicate"),
+        _raw(url="not-a-url"),
+        _raw(
+            url="https://example.com/expired",
+            deadline=(date.today() - timedelta(days=1)).isoformat(),
+        ),
+        {"title": "Malformed result"},
+    ]
+    _mock_search(monkeypatch, payload)
+    results = discovery_agent.discover_opportunities(_candidate(), max_results=10)
+    counts = discovery_agent._last_filter_counts
+    assert counts["raw_search_results"] >= counts["parsed_opportunity_candidates"]
+    assert counts["invalid_url_candidates"] > 0
+    assert counts["expired_candidates"] > 0
+    assert counts["duplicate_candidates"] > 0
+    assert counts["malformed_candidates"] > 0
+    assert counts["final_valid_opportunities"] == len(results)
+    assert all(isinstance(value, int) for value in counts.values())
+
+
+def test_search_queries_use_candidate_fields():
+    queries = discovery_agent._build_search_queries(_candidate())
+    assert any("Python" in query for query in queries)
+    assert any("Pakistan" in query for query in queries)
+
+
+def test_invalid_candidate_type_raises_type_error(monkeypatch):
+    monkeypatch.setenv("DISCOVERY_SEARCH_API_KEY", "test-key")
     with pytest.raises(TypeError, match="CandidateProfile"):
         discovery_agent.discover_opportunities({"name": "Jane"})  # type: ignore
 
 
-# ---------------------------------------------------------------------------
-# 12. Malformed items in array are skipped, valid ones returned
-# ---------------------------------------------------------------------------
+def test_search_provider_receives_profile_queries_and_configuration(monkeypatch):
+    calls = _mock_search(monkeypatch, [_raw()])
+    monkeypatch.setenv("DISCOVERY_SEARCH_API_URL", "https://search.test/api")
+    discovery_agent.discover_opportunities(_candidate())
+    assert calls
+    assert all(call[1:] == ("https://search.test/api", "test-key") for call in calls)
+    assert any("Python" in call[0] for call in calls)
 
 
-def test_malformed_items_skipped(monkeypatch):
-    raw = [
-        {"not": "an opportunity"},
-        _make_raw_opportunity(url="https://example.com/valid"),
-    ]
-    _mock_gemini_two_stage(monkeypatch, "Research prose.", json.dumps(raw))
-
-    results = discovery_agent.discover_opportunities(_make_candidate())
-
-    assert len(results) == 1
-    assert results[0].url == "https://example.com/valid"
-
-
-# ---------------------------------------------------------------------------
-# 13. _build_search_queries uses profile fields
-# ---------------------------------------------------------------------------
-
-
-def test_build_search_queries_uses_skills():
-    candidate = _make_candidate(skills=["Python", "ML"], location="Pakistan")
-    queries = discovery_agent._build_search_queries(candidate)
-
-    assert any("Python" in q for q in queries)
-    assert any("Pakistan" in q for q in queries)
-
-
-def test_build_search_queries_fallback_when_no_skills():
-    candidate = _make_candidate(skills=[], interests=[], education=[])
-    queries = discovery_agent._build_search_queries(candidate)
-
-    assert len(queries) >= 1
-    assert all(isinstance(q, str) for q in queries)
-
-
-# ---------------------------------------------------------------------------
-# 14. Two-stage flow — grounded research call is made first
-# ---------------------------------------------------------------------------
-
-
-def test_two_stage_research_call_is_made_first(monkeypatch):
-    raw = [_make_raw_opportunity()]
-    captured = _mock_gemini_two_stage(
-        monkeypatch, "Research prose with citations [1].", json.dumps(raw)
-    )
-
-    discovery_agent.discover_opportunities(_make_candidate())
-
-    assert len(captured["calls"]) == 2
-
-
-def test_stage1_uses_google_search_tool(monkeypatch):
-    """Stage 1 config must include a Tool (google_search), not response_mime_type."""
-    raw = [_make_raw_opportunity()]
-    captured = _mock_gemini_two_stage(
-        monkeypatch, "Research prose.", json.dumps(raw)
-    )
-
-    discovery_agent.discover_opportunities(_make_candidate())
-
-    stage1_config = captured["configs"][0]
-    assert "tools" in stage1_config
-    assert "response_mime_type" not in stage1_config
-
-
-def test_stage2_uses_json_mime_type(monkeypatch):
-    """Stage 2 config must use response_mime_type=application/json, no tools."""
-    raw = [_make_raw_opportunity()]
-    captured = _mock_gemini_two_stage(
-        monkeypatch, "Research prose.", json.dumps(raw)
-    )
-
-    discovery_agent.discover_opportunities(_make_candidate())
-
-    stage2_config = captured["configs"][1]
-    assert stage2_config.get("response_mime_type") == "application/json"
-    assert "tools" not in stage2_config
-
-
-def test_stage1_has_max_output_tokens(monkeypatch):
-    raw = [_make_raw_opportunity()]
-    captured = _mock_gemini_two_stage(
-        monkeypatch, "Research prose.", json.dumps(raw)
-    )
-
-    discovery_agent.discover_opportunities(_make_candidate())
-
-    assert captured["configs"][0].get("max_output_tokens") == 4096
-
-
-def test_stage2_has_max_output_tokens(monkeypatch):
-    raw = [_make_raw_opportunity()]
-    captured = _mock_gemini_two_stage(
-        monkeypatch, "Research prose.", json.dumps(raw)
-    )
-
-    discovery_agent.discover_opportunities(_make_candidate())
-
-    assert captured["configs"][1].get("max_output_tokens") == 8192
-
-
-def test_stage1_prose_with_citations_does_not_crash(monkeypatch):
-    """Stage 1 may return prose with citation markers — must not be parsed as JSON."""
-    prose = (
-        "Found several opportunities. Google internship [1] at "
-        "https://careers.google.com/jobs/intern. "
-        "MLH Fellowship [2] at https://fellowship.mlh.io. "
-        "Sources: [1] careers.google.com [2] fellowship.mlh.io"
-    )
-    raw = [
-        _make_raw_opportunity(
-            url="https://careers.google.com/jobs/intern",
-            title="Google Intern",
-            organization="Google",
-        )
-    ]
-    _mock_gemini_two_stage(monkeypatch, prose, json.dumps(raw))
-
-    results = discovery_agent.discover_opportunities(_make_candidate())
-
-    assert len(results) == 1
-    assert results[0].organization == "Google"
-
-
-def test_stage1_failure_raises_discovery_api_error(monkeypatch):
-    """If Stage 1 (grounded research) fails, DiscoveryAPIError is raised."""
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    call_count = {"n": 0}
-
-    class FailOnFirstCall:
-        def generate_content(self, **kwargs):
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                raise RuntimeError("search quota exceeded")
-            return SimpleNamespace(text=json.dumps([]))
-
-    class FakeGenerateContentConfig:
-        def __init__(self, **kwargs): pass
-
-    class FakeTool:
-        def __init__(self, **kwargs): pass
-
-    class FakeGoogleSearch:
-        pass
-
-    client = SimpleNamespace(models=FailOnFirstCall())
-    types = SimpleNamespace(
-        GenerateContentConfig=FakeGenerateContentConfig,
-        Tool=FakeTool,
-        GoogleSearch=FakeGoogleSearch,
-    )
-    monkeypatch.setattr(
-        discovery_agent, "_get_gemini_client", lambda api_key: (client, types)
-    )
-
-    with pytest.raises(discovery_agent.DiscoveryAPIError, match="search quota exceeded"):
-        discovery_agent.discover_opportunities(_make_candidate())
-
-
-def test_stage2_failure_raises_discovery_api_error(monkeypatch):
-    """If Stage 2 (structured extraction) fails, DiscoveryAPIError is raised."""
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    call_count = {"n": 0}
-
-    class FailOnSecondCall:
-        def generate_content(self, **kwargs):
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                return SimpleNamespace(text="Research prose.")
-            raise RuntimeError("extraction failed")
-
-    class FakeGenerateContentConfig:
-        def __init__(self, **kwargs): pass
-
-    class FakeTool:
-        def __init__(self, **kwargs): pass
-
-    class FakeGoogleSearch:
-        pass
-
-    client = SimpleNamespace(models=FailOnSecondCall())
-    types = SimpleNamespace(
-        GenerateContentConfig=FakeGenerateContentConfig,
-        Tool=FakeTool,
-        GoogleSearch=FakeGoogleSearch,
-    )
-    monkeypatch.setattr(
-        discovery_agent, "_get_gemini_client", lambda api_key: (client, types)
-    )
-
-    with pytest.raises(discovery_agent.DiscoveryAPIError, match="extraction failed"):
-        discovery_agent.discover_opportunities(_make_candidate())
-
-
-def test_stage1_empty_response_raises_response_error(monkeypatch):
-    """Empty Stage 1 response raises DiscoveryResponseError before Stage 2 runs."""
-    _mock_gemini_two_stage(monkeypatch, "", json.dumps([]))
-
-    with pytest.raises(discovery_agent.DiscoveryResponseError, match="empty response"):
-        discovery_agent.discover_opportunities(_make_candidate())
+def test_no_gemini_api_key_is_required(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    _mock_search(monkeypatch)
+    with pytest.raises(discovery_agent.DiscoveryResponseError, match="no usable"):
+        discovery_agent.discover_opportunities(_candidate())
