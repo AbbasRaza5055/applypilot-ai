@@ -126,6 +126,10 @@ def generate_resume_pdf(
 
             if not line:
                 y -= line_height
+                if y <= margin:
+                    pdf.showPage()
+                    pdf.setFont("Helvetica", 10)
+                    y = page_height - margin
                 continue
 
             words = line.split()

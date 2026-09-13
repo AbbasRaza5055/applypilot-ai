@@ -103,3 +103,17 @@ def test_pdf_creates_parent_directory(tmp_path):
 
     assert result == str(output)
     assert output.exists()
+
+
+def test_pdf_blank_lines_force_page_boundary(tmp_path):
+    # ~60 blank lines exceed a single letter-page (792pt height, 50pt margins,
+    # 15pt line_height → ~46 lines per page), guaranteeing the blank-line
+    # pagination path is exercised.
+    resume = "John Doe\n" + "\n" * 60 + "Skills: Python"
+    output = tmp_path / "resume_blank_lines.pdf"
+
+    result = generate_resume_pdf(resume, str(output))
+
+    assert result == str(output)
+    assert output.exists()
+    assert output.stat().st_size > 0
